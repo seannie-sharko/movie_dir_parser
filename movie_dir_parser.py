@@ -22,13 +22,14 @@ for root, dirs, files in os.walk(directory):
     for file in files:
         if not file.endswith('.part') and '.mp4' in file:
             directory_name = os.path.basename(root)
-            for file_name in os.listdir(os.path.join(directory, directory_name)):
-              current_dir = os.path.join(directory, directory_name)
-              if os.path.isfile(os.path.join(current_dir, file_name)):
-                if file_name in ['RARBG_DO_NOT_MIRROR.exe', 'RARBG.txt', 'RARBG_DO_NOT_MIRROR.exe@SynoResource', 'RARBG.txt@SynoResource']:
-                    removed_files = os.path.join(root, file)
+            if '@eaDir' not in directory_name:
+              for file_name in os.listdir(os.path.join(directory, directory_name)):
+                current_dir = os.path.join(directory, directory_name)   
+                if os.path.isfile(os.path.join(current_dir, file_name)):
+                  if file_name in ['RARBG_DO_NOT_MIRROR.exe', 'RARBG.txt', 'RARBG_DO_NOT_MIRROR.exe@SynoResource', 'RARBG.txt@SynoResource']
+                    removed_files = os.path.join(root, file_name)
                     print(f"Deleting:  {removed_files}")
-                    os.remove(removed_files)                
+                    os.remove(removed_files)
             if directory_name not in ['@eaDir', 'movies1_new', 'Subs', 'subs']:
                 if '(' not in directory_name or ')' not in directory_name:
                     completed_list.append(directory_name)
@@ -38,8 +39,8 @@ for root, dirs, files in os.walk(directory):
 # Rename directory of completed movie
 # and output table showing results
 table = Table(title="Updating Movies...")
-table.add_column("Original", justify="left", style="cyan")
-table.add_column("Changed", justify="left", style="yellow")
+table.add_column("Original", justify="left", style="cyan", no_wrap=True)
+table.add_column("Changed", justify="left", style="yellow", no_wrap=True)
 for movie_name in completed_list:
   split_item = movie_name.split('.')[:-3]
   if re.search('\\d\\d\\d\\d', split_item[-1]):
@@ -50,7 +51,7 @@ for movie_name in completed_list:
       changed_dir_path = os.path.join(directory, changed_dir_name)
       if os.path.isdir(original_dir_path):
           os.rename(original_dir_path, changed_dir_path)
-          table.add_row(i, changed_dir_name)
+          table.add_row(movie_name, changed_dir_name)
   else:
       del split_item[-1]
       year = split_item[-1]
@@ -60,7 +61,7 @@ for movie_name in completed_list:
       changed_dir_path = os.path.join(directory, changed_dir_name)
       if os.path.isdir(original_dir_path):
         os.rename(original_dir_path, changed_dir_path)
-        table.add_row(i, changed_dir_name)
+        table.add_row(movie_name, changed_dir_name)
 
 console = Console()
 console.print(table)
