@@ -8,23 +8,44 @@ import shutil
 import transmission_rpc
 
 # Constants
+VIDEO_EXTENSIONS = {".mp4", ".mkv"}
+JUNK_SUFFIXES = (".exe", "www.YTS.MX.jpg", "@SynoResource")
+YEAR_PATTERN = re.compile(r"[12][0-9]{3}")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 USERNAME = os.getenv("TRANSMISSION_USERNAME")
 PASSWORD = os.getenv("TRANSMISSION_PASSWORD")
 TRANSMISSION_HOST = os.getenv("TRANSMISSION_HOST")
-TRANSMISSION_PORT = int(os.getenv("TRANSMISSION_PORT"))
+NEW_MOVIE_DIRECTORIES_ENV = "NEW_MOVIE_DIRECTORIES"
+MOVIES_DIRECTORIES_ENV = "MOVIES_DIRECTORIES"
+port_str = os.getenv("TRANSMISSION_PORT", "9091")
+
+try:
+    TRANSMISSION_PORT = int(port_str)
+except ValueError:
+    raise ValueError("TRANSMISSION_PORT must be an integer")
+
+if not (1 <= TRANSMISSION_PORT <= 65535):
+    raise ValueError("TRANSMISSION_PORT must be between 1 and 65535")
 TRANSMISSION_PROTOCOL = os.getenv("TRANSMISSION_PROTOCOL")
+
+
+def parse_env_list(env_var_name):
+    """Parse a comma-separated environment variable into a list of paths."""
+    raw_value = os.getenv(env_var_name, "")
+    values = [item.strip() for item in raw_value.split(",") if item.strip()]
+    if not values:
+        raise ValueError(
+            f"{env_var_name} must be set to a comma-separated list of directories"
+        )
+    return values
 
 
 def build_movie_lists(movies_directories):
     """Build movie lists for specified directories."""
-    movie_lists = []
-    for directory in movies_directories:
-        movie_list = []
-        for file_name in os.listdir(directory):
-            movie_list.append(file_name.lower())
-        movie_lists.append(movie_list)
-    return movie_lists
+    return [
+        [file_name.lower() for file_name in os.listdir(directory)]
+        for directory in movies_directories
+    ]
 
 
 def remove_completed_movies(trans_client):
@@ -56,13 +77,13 @@ def collect_completed_movies(directory):
     """
     completed_list = []
     skipped_list = []
-    # directory: '/media/movies3_new'
+    # directory: '/path/new_movies'
     # directory_name: Movie.Title.2012.1080p.BluRay.x265-RARBG or Movie Title (2012)
-    # root: /media/movies3_new/Movie.Title.2012.1080p.BluRay.x265-RARBG
+    # root: /path/new_movies/Movie.Title.2012.1080p.BluRay.x265-RARBG
     # file(s): Movie.Title.2012.1080p.BluRay.x265-RARBG.mp4
     for root, dirs, files in os.walk(directory):
         for file in files:
-            if file.endswith('.mp4') or file.endswith('.mkv'):
+            if os.path.splitext(file)[1] in VIDEO_EXTENSIONS:
                 directory_name = os.path.basename(root)
                 if directory_name not in ['(', ')']:
                     # Movie.Title.2012.1080p.BluRay.x265-RARBG
@@ -88,13 +109,10 @@ def delete_junk_files(directory):
     print("Output log:")
     for root, dirs, files in os.walk(directory):
         for file in files:
-            if '.part' not in file \
-                    and file.endswith('txt') \
-                        or file.endswith('exe') \
-                        or file.endswith('www.YTS.MX.jpg') \
-                        or file.endswith('@SynoResource'):
-                    print(f"Deleting:  {os.path.join(root, file)}")
-                    os.remove(os.path.join(root, file))
+            if is_junk_file(file):
+                file_path = os.path.join(root, file)
+                print(f"Deleting:  {file_path}")
+                os.remove(file_path)
 
 
 # Helper Functions
@@ -107,58 +125,69 @@ def send_webhook_notification(title, message, cur_date):
     requests.post(WEBHOOK_URL, json=payload)
 
 
-def generate_changed_name(movie_name, directory):
-    """Generate the changed directory name for a movie."""
-    original_dir_path = os.path.join(directory, movie_name)
+def is_junk_file(file_name):
+    """Return True when the file matches one of the cleanup patterns."""
+    return (
+        (file_name.endswith('.txt') and '.part' not in file_name)
+        or file_name.endswith(JUNK_SUFFIXES)
+    )
+
+
+def build_renamed_movie_name(movie_name):
+    """Generate a normalized directory name for a movie."""
     # Movie Title (2012) [1080p] [BluRay] [5.1] [YTS.MX]
     if ')' in movie_name and '[1080p]' in movie_name:
-        changed_dir_name = re.sub(r'\[.*?\][^)]*$', '', movie_name).strip()
-        return original_dir_path, changed_dir_name
+        return re.sub(r'\[.*?\][^)]*$', '', movie_name).strip()
     # Movie.Title.2012.1080p.BluRay.x265-RARBG
     # Movie.Title.2012.SPANISH.1080p.WEBRip.1600MB.DD5.1.x264-GalaxyRG
-    for item in movie_name.split('.'):
+    name_parts = movie_name.split('.')
+    for index, item in enumerate(name_parts):
         if '1080' in item:
-            year = extract_year_before_1080p(movie_name, item)
+            year = extract_release_year(name_parts, index)
             if year:
-                split_list = movie_name.split('.')[:movie_name.split('.').index(item)]
-                return original_dir_path, f"{' '.join(split_list)} ({year})"
-    return None, None
+                return f"{' '.join(name_parts[:index])} ({year})"
+    return None
 
 
-def extract_year_before_1080p(movie_name, item):
+def extract_release_year(name_parts, quality_index):
     """Extract the year before the 1080p label."""
-    for split_item in range(0, len(movie_name.split('.'))):
-        year_match = re.search(r'[12][0-9]{3}', movie_name.split('.')[movie_name.split('.').index(item) - split_item])
-        if year_match and '1080p' != year_match.group(0):
+    for candidate in reversed(name_parts[:quality_index]):
+        year_match = YEAR_PATTERN.search(candidate)
+        if year_match:
             return year_match.group(0)
     return None
 
 
-def update_movie_directory(original_dir_path, changed_dir_path, movie_name, cur_date):
-    """Update the movie directory and send a notification."""
+def rename_movie_directory(original_dir_path, changed_dir_path):
+    """Rename a movie directory if it exists."""
     if os.path.isdir(original_dir_path):
         os.rename(original_dir_path, changed_dir_path)
         return changed_dir_path
     return None
 
 
-def process_movies(directory, completed_list):
+def process_movies(directory, completed_movies):
     now = dt.now()
     cur_date = now.strftime("%A %m/%d/%-Y @ %H:%M:%S")
     table = Table(title="Updating Movies...")
     table.add_column("Original", justify="left", style="cyan", min_width=50)
     table.add_column("Changed", justify="left", style="yellow", min_width=50)
-    finished_list = []
-    for movie_name in completed_list:
-        original_dir_path, changed_dir_name = generate_changed_name(movie_name, directory)
-        if original_dir_path and changed_dir_name:
-            changed_dir_path = os.path.join(directory, changed_dir_name)
-            updated_path = update_movie_directory(original_dir_path, changed_dir_path, movie_name, cur_date)
-            if updated_path:
-                table.add_row(movie_name, changed_dir_name)
-                finished_list.append(changed_dir_name)
-                send_webhook_notification(changed_dir_name, "Completed", cur_date)
-    return table, finished_list
+    renamed_movies = []
+    for movie_name in completed_movies:
+        changed_dir_name = build_renamed_movie_name(movie_name)
+        if not changed_dir_name:
+            continue
+
+        original_dir_path = os.path.join(directory, movie_name)
+        changed_dir_path = os.path.join(directory, changed_dir_name)
+        updated_path = rename_movie_directory(original_dir_path, changed_dir_path)
+        if not updated_path:
+            continue
+
+        table.add_row(movie_name, changed_dir_name)
+        renamed_movies.append(changed_dir_name)
+        send_webhook_notification(changed_dir_name, "Completed", cur_date)
+    return table, renamed_movies
 
 
 def send_deletion_notification(movie_name, movie_dir_name, cur_date):
@@ -170,6 +199,7 @@ def send_deletion_notification(movie_name, movie_dir_name, cur_date):
     }
     requests.post(WEBHOOK_URL, json=payload)
 
+
 def delete_movie_directory(movie_name, movie_dir_name):
     """Delete a movie directory if it exists."""
     removed_dir_path = os.path.join(movie_dir_name, movie_name)
@@ -178,6 +208,7 @@ def delete_movie_directory(movie_name, movie_dir_name):
         shutil.rmtree(removed_dir_path)
         return removed_dir_path
     return None
+
 
 def process_deleted_movies(finished_list, all_movies, new_movie_directories):
     """Process movie deletions from specified directories."""
@@ -200,6 +231,13 @@ def process_deleted_movies(finished_list, all_movies, new_movie_directories):
 
 
 def main():
+    new_movie_directories = parse_env_list(NEW_MOVIE_DIRECTORIES_ENV)
+    movies_directories = parse_env_list(MOVIES_DIRECTORIES_ENV)
+    if len(new_movie_directories) < 2:
+        raise ValueError(f"{NEW_MOVIE_DIRECTORIES_ENV} must include at least 2 directories")
+    if len(movies_directories) < 4:
+        raise ValueError(f"{MOVIES_DIRECTORIES_ENV} must include at least 4 directories")
+
     trans_client = transmission_rpc.Client(
         username=USERNAME,
         password=PASSWORD,
@@ -212,20 +250,6 @@ def main():
 
     # Clear completed movies from Transmission
     remove_completed_movies(trans_client)
-
-    # Directory paths (mount points on SeedBox)
-    # Staging Dirs
-    new_movie_directories = [
-        '/media/movies1_new',
-        '/media/movies3_new'
-    ]
-    # Home Dirs
-    movies_directories = [
-        '/media/movies1/Library1',
-        '/media/movies2/Library2',
-        '/media/movies3/Library3',
-        '/media/movies1/Library1/__NAS_Collection'
-    ]
 
     # Build current movie lists
     mov1_list, mov2_list, mov3_list, mov1_col_list = build_movie_lists(movies_directories)
@@ -244,8 +268,8 @@ def main():
     # Delete junk files
     for item in new_movie_directories:
         delete_junk_files(item)
-    delete_junk_files('/media/movies3/Library3')
-    delete_junk_files('/media/movies2/Library2')
+    # delete_junk_files(movies_directories[1])
+    delete_junk_files(movies_directories[2])
 
     # Collect completed movies
     completed_list, skipped_list = collect_completed_movies(new_movie_directories[0])
@@ -253,13 +277,13 @@ def main():
 
     # Rename completed movies
     table, finished_list = process_movies(new_movie_directories[0], completed_list)
-    table_3, finished_list_3 = process_movies(new_movie_directories[1], completed_list)
+    table_3, finished_list_3 = process_movies(new_movie_directories[1], completed_list_3)
 
     # Remove duplicates and empty dirs
     print('\n---> Deleting duplicate movies...')
     print('Output log:')
     remove_list = process_deleted_movies(finished_list, all_movies, new_movie_directories)
-    remove_list_3 = process_deleted_movies(finished_list, all_movies, new_movie_directories)
+    remove_list_3 = process_deleted_movies(finished_list_3, all_movies, new_movie_directories)
 
     # Calculate total new movies (downloaded - removed duplicates)
     new_list = len(finished_list) + len(finished_list_3) - len(remove_list) - len(remove_list_3)
