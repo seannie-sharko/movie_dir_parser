@@ -84,7 +84,7 @@ The script reads these environment variables:
 Install the packages used by the script:
 
 ```bash
-pip install rich requests transmission-rpc
+pip install -r requirements.txt
 ```
 
 ## Running the script
