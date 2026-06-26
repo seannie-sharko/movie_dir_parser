@@ -11,7 +11,7 @@ import transmission_rpc
 
 # Constants
 VIDEO_EXTENSIONS = {".mp4", ".mkv"}
-JUNK_SUFFIXES = (".exe", "www.YTS.MX.jpg", "@SynoResource")
+JUNK_SUFFIXES = (".exe", "www.YTS.MX.jpg", "@SynoResource", "Official site.jpg")
 YEAR_PATTERN = re.compile(r"[12][0-9]{3}")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 USERNAME = os.getenv("TRANSMISSION_USERNAME")
