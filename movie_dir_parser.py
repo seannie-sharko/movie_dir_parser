@@ -1,6 +1,8 @@
 from datetime import datetime as dt
 from rich.console import Console
 from rich.table import Table
+from pathlib import Path
+import shutil
 import os
 import re
 import requests
@@ -159,11 +161,25 @@ def extract_release_year(name_parts, quality_index):
 
 
 def rename_movie_directory(original_dir_path, changed_dir_path):
-    """Rename a movie directory if it exists."""
-    if os.path.isdir(original_dir_path):
-        os.rename(original_dir_path, changed_dir_path)
-        return changed_dir_path
-    return None
+    original = Path(original_dir_path)
+    changed = Path(changed_dir_path)
+
+    if original == changed:
+        return str(original)
+
+    if changed.exists():
+        print(f"Skipping rename: destination already exists: {changed}")
+        return str(original)
+
+    original.rename(changed)
+    return str(changed)
+
+# def rename_movie_directory(original_dir_path, changed_dir_path):
+#     """Rename a movie directory if it exists."""
+#     if os.path.isdir(original_dir_path):
+#         os.rename(original_dir_path, changed_dir_path)
+#         return changed_dir_path
+#     return None
 
 
 def process_movies(directory, completed_movies):
