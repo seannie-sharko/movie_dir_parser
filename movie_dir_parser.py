@@ -176,13 +176,6 @@ def rename_movie_directory(original_dir_path, changed_dir_path):
     original.rename(changed)
     return str(changed)
 
-# def rename_movie_directory(original_dir_path, changed_dir_path):
-#     """Rename a movie directory if it exists."""
-#     if os.path.isdir(original_dir_path):
-#         os.rename(original_dir_path, changed_dir_path)
-#         return changed_dir_path
-#     return None
-
 
 def process_movies(directory, completed_movies):
     now = dt.now()
