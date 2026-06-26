@@ -285,7 +285,7 @@ def main():
     for item in new_movie_directories:
         delete_junk_files(item)
     # delete_junk_files(movies_directories[1])
-    delete_junk_files(movies_directories[2])
+    # delete_junk_files(movies_directories[2])
 
     # Collect completed movies
     completed_list, skipped_list = collect_completed_movies(new_movie_directories[0])
