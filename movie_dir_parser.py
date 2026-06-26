@@ -161,6 +161,8 @@ def extract_release_year(name_parts, quality_index):
 
 
 def rename_movie_directory(original_dir_path, changed_dir_path):
+    """Rename a movie directory if it doesn't exists.
+       Guard if it does"""
     original = Path(original_dir_path)
     changed = Path(changed_dir_path)
 
