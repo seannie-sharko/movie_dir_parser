@@ -180,6 +180,7 @@ def rename_movie_directory(original_dir_path, changed_dir_path):
 def process_movies(directory, completed_movies):
     now = dt.now()
     cur_date = now.strftime("%A %m/%d/%-Y @ %H:%M:%S")
+
     table = Table(title="Updating Movies...")
     table.add_column("Original", justify="left", style="cyan", min_width=50)
     table.add_column("Changed", justify="left", style="yellow", min_width=50)
