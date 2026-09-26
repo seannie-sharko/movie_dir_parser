@@ -189,6 +189,50 @@ class ParserTests(unittest.TestCase):
         self.assertTrue((self.root / "Movie (2012)" / "movie.mp4").exists())
         self.post.assert_called_once()
 
+    def test_reported_release_name_renames_when_source_exists(self):
+        source = self.movie("500 Miles (2026) [1080p] [WEBRip] [5.1] [YTS.GG - YTS.BZ]")
+        _, renamed = parser.process_movies(str(self.root), [source.name])
+        self.assertEqual(renamed, ["500 Miles (2026)"])
+        self.assertTrue((self.root / "500 Miles (2026)/movie.mp4").exists())
+        self.post.assert_called_once()
+
+    def test_source_vanishing_during_rename_does_not_abort_next_movie(self):
+        source = self.movie("500 Miles (2026) [1080p] [WEBRip] [5.1] [YTS.GG - YTS.BZ]")
+        next_movie = self.movie("Next (2020) [1080p]")
+        original_rename = Path.rename
+
+        def rename_after_source_disappears(path, destination):
+            if path == source:
+                (path / "movie.mp4").unlink()
+                path.rmdir()
+            return original_rename(path, destination)
+
+        with patch.object(Path, "rename", autospec=True, side_effect=rename_after_source_disappears), \
+                patch.object(parser, "log_event") as output:
+            table, renamed = parser.process_movies(str(self.root), [source.name, next_movie.name])
+        self.assertEqual(renamed, ["Next (2020)"])
+        self.assertEqual(table.row_count, 1)
+        self.assertTrue((self.root / "Next (2020)/movie.mp4").exists())
+        self.assertFalse((self.root / "500 Miles (2026)").exists())
+        self.post.assert_called_once()
+        self.assertEqual(self.post.call_args.kwargs["json"]["title"], "Next (2020)")
+        self.assertEqual(output.call_args.args[0], "MISSING")
+        self.assertIn(str(source), output.call_args.args[1])
+
+    def test_missing_parent_skips_rename_without_notification(self):
+        table, renamed = parser.process_movies(str(self.root / "unavailable"), ["Movie (2012) [1080p]"])
+        self.assertEqual(renamed, [])
+        self.assertEqual(table.row_count, 0)
+        self.post.assert_not_called()
+
+    def test_other_rename_errors_are_not_silently_ignored(self):
+        source = self.movie("Movie (2012) [1080p]")
+        with patch.object(Path, "rename", side_effect=PermissionError("read-only share")):
+            with self.assertRaises(PermissionError):
+                parser.process_movies(str(self.root), [source.name])
+        self.assertTrue((source / "movie.mp4").exists())
+        self.post.assert_not_called()
+
     def test_duplicates_deleted_and_unique_movies_preserved(self):
         duplicate = self.movie("Movie (2012)")
         unique = self.movie("Unique (2020)")
@@ -216,14 +260,39 @@ class ParserTests(unittest.TestCase):
         linked_video.mkdir()
         (linked_video / "movie.mp4").symlink_to(valid / "movie.mp4")
         candidates = parser.build_movie_lists([self.library_root])
-        self.assertCountEqual(candidates[0], [valid, self.library_root / "Empty (2013)", linked_video])
+        self.assertCountEqual(candidates[0], [valid, self.library_root / "Empty (2013)",
+                                            self.library_root / "File (2014)",
+                                            self.library_root / "Link (2015)", linked_video])
         empty_match = self.movie("Empty (2013)")
         linked_match = self.movie("Linked Video (2016)")
+        file_match = self.movie("File (2014)")
+        symlink_match = self.movie("Link (2015)")
         self.assertEqual(parser.process_deleted_movies(
-            [empty_match.name, linked_match.name], candidates, [self.root]
+            [empty_match.name, linked_match.name, file_match.name, symlink_match.name],
+            candidates, [self.root]
         ), [])
         self.assertTrue((empty_match / "movie.mp4").exists())
         self.assertTrue((linked_match / "movie.mp4").exists())
+        self.assertTrue((file_match / "movie.mp4").exists())
+        self.assertTrue((symlink_match / "movie.mp4").exists())
+
+    def test_name_index_does_not_request_metadata_for_movie_candidates(self):
+        libraries = [self.root / f"library{i}" for i in range(4)]
+        entries = [SimpleNamespace(
+            name=f"Movie {i} (2026)", path=str(library / f"Movie {i} (2026)"),
+            is_dir=Mock(side_effect=AssertionError("Unexpected remote metadata lookup"))
+        ) for i, library in enumerate(libraries)]
+        scans = []
+        for entry in entries:
+            scan = Mock()
+            scan.__enter__ = Mock(return_value=iter([entry]))
+            scan.__exit__ = Mock(return_value=False)
+            scans.append(scan)
+        with patch.object(parser.os, "scandir", side_effect=scans):
+            result = parser.build_movie_lists(libraries)
+        self.assertEqual(result, [[Path(entry.path)] for entry in entries])
+        for entry in entries:
+            entry.is_dir.assert_not_called()
 
     def test_flat_library_scan_does_not_open_any_movie_folder(self):
         movies = self.library_movies("One (2012)", "Two (2013)")[0]
@@ -505,7 +574,7 @@ class ParserTests(unittest.TestCase):
             SimpleNamespace(name="Downloading", is_finished=False, status="downloading", error=0, id=2),
         ]
         parser.remove_completed_movies(client)
-        client.remove_torrent.assert_called_once_with(1)
+        client.remove_torrent.assert_called_once_with(1, delete_data=False)
 
     def test_main_accepts_documented_minimum_directories(self):
         staging = [self.movie(f"stage{i}", ()) for i in range(2)]

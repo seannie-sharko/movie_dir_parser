@@ -47,6 +47,8 @@ Movie folders can be nested inside grouping folders. Renames preserve the parent
 
 If the destination folder already exists, the rename is skipped and the source stays unchanged. The attempted rename is not counted as finished and does not send a completion notification. The existing normalized destination is independently eligible for duplicate deletion when a library copy exists. Names that do not match a supported rename pattern are left unchanged.
 
+If a source folder or its parent becomes unavailable between discovery and rename, a `MISSING` event records the source and target paths and processing continues with the next movie. That attempt is not counted as finished and sends no completion notification. Other rename errors, such as permission failures, still stop the run. Transmission removal explicitly uses `delete_data=False` to keep downloaded files.
+
 ## Directory configuration
 
 The script reads its staging and library directories from environment variables.
@@ -71,9 +73,9 @@ The current script expects:
 
 Every staging directory receives junk cleanup, movie discovery, renaming, duplicate processing, and empty-folder cleanup. Both successfully renamed folders and already normalized folders are checked against the libraries. Only the staging copy is deleted.
 
-Library indexing collects normalized directory names ending with a parenthesized year, such as `The Rise And Fall Of The Clash (2012)`, without opening those movie folders. Other directory names, loose files, `@eaDir`, and symbolic links are excluded. When four or more libraries are configured, the fourth is treated as a nested collection: grouping folders are traversed until normalized movie folders are reached, then traversal stops at those movie folders. Other libraries use immediate child directory names.
+Library indexing collects entry names ending with a parenthesized year, such as `The Rise And Fall Of The Clash (2012)`, without opening movie folders or requesting their file types. `@eaDir` is excluded. When four or more libraries are configured, the fourth is treated as a nested collection: entries without a normalized movie name are checked for being real directories before traversal. Traversal stops at normalized movie names, and grouping symlinks are not followed. Other libraries use immediate child entry names.
 
-The names are indexed once using `casefold()` for case-insensitive lookup. Only a library folder whose name matches a staging candidate is opened to verify that it contains a regular video before deletion. An empty folder may appear in the name index, but it never authorizes duplicate deletion.
+The names are indexed once using `casefold()` for case-insensitive lookup. Only a library entry whose name matches a staging candidate is checked to verify that it is a real directory containing a regular video before deletion. An empty folder, file, or symlink with a movie-like name can appear in the candidate index, but never authorizes duplicate deletion.
 
 All configured paths must exist and be directories. Staging roots must not overlap each other or any library root: identical paths, nested paths, and aliases resolving to such paths are rejected. Library roots may overlap each other, as in the collection example above. The script validates these rules and scans the libraries before connecting to Transmission or changing staging files.
 
@@ -131,16 +133,16 @@ Nonempty rename tables show original and normalized names for each staging direc
 | Skipped | Video folders already ending with a parenthesized year, including any subsequently deleted as duplicates |
 | Deleted | Duplicate staging movie folders deleted, including already normalized folders |
 | New | Successfully renamed folders remaining after duplicate deletion; deletion of older normalized folders does not reduce this count |
-| New Total | Sum of normalized directory names indexed across the configured libraries |
+| New Total | Sum of normalized entry names indexed across the configured libraries |
 | Empty Removed | Empty descendant directories removed after staging processing |
 
-`New Total` is a directory-name count, not a verified video count: empty normalized folders can be included, and overlapping library roots can count the same folder more than once. It does not include newly renamed staging folders. Rename collisions and unsupported names are not included in the Skipped count. Deleted folder paths are printed in the output log.
+`New Total` is a candidate-name count, not a verified video count: empty folders, files, or symlinks with normalized movie names can be included, and overlapping library roots can count the same entry more than once. It does not include newly renamed staging folders. Rename collisions, unavailable rename paths, and unsupported names are not included in the Skipped count. Deleted folder paths are printed in the output log.
 
 ## Slow library scans
 
 Startup validates the configured paths and indexes library names before connecting to Transmission or modifying staging files. Each path validation and directory listing prints an immediately flushed progress message. Each library finishes with its normalized name count, scanned directory count, and elapsed time.
 
-The scan uses `os.scandir` to reuse directory-listing metadata. A flat library takes one directory listing, regardless of its number of movie folders. Nested collection groups require additional listings, but movie folders and their extras are not opened during indexing. Only name matches require video checks later. Filesystems that do not provide entry types may still require extra metadata requests to identify directories.
+The scan uses `os.scandir` to read entry names. A flat library takes one directory listing, regardless of its number of movie folders, with no per-entry type checks. This avoids `is_dir()` calls that can each trigger a remote metadata request on shares without entry types. Nested collection groups still require directory checks and additional listings, but movie candidates and their extras are not opened during indexing. Only name matches require type and video checks later. The directory listing itself can still be slow on an unresponsive drive or share.
 
 If output stops at a `VALIDATE`, `SCAN`, or `VERIFY` event, the displayed path identifies the current filesystem operation. Check that drive or network mount if it remains unresponsive. A blocked operating-system filesystem call has no portable timeout here; progress output cannot make a stalled mount respond. A reported library scan error stops the run before torrent or staging changes, while a failed retained-copy check prevents that duplicate deletion.
 

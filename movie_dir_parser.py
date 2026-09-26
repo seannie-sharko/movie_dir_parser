@@ -64,7 +64,7 @@ def parse_env_list(env_var_name):
 
 
 def build_movie_lists(movies_directories):
-    """Collect normalized folder names without opening individual movie folders."""
+    """Index matching entry names; defer movie type checks until a deletion match."""
     movie_lists = []
     for index, directory in enumerate(movies_directories):
         base = Path(directory)
@@ -82,13 +82,12 @@ def build_movie_lists(movies_directories):
                     if entry.name == '@eaDir':
                         continue
                     normalized = NORMALIZED_MOVIE_PATTERN.search(entry.name)
-                    if not normalized and not recursive:
-                        continue
-                    if not entry.is_dir(follow_symlinks=False):
-                        continue
                     if normalized:
+                        # Even DirEntry.is_dir() can issue a remote stat when the
+                        # share doesn't supply entry types. Read names only here;
+                        # has_video() validates real directories before deletion.
                         movies.append(Path(entry.path))
-                    elif recursive:
+                    elif recursive and entry.is_dir(follow_symlinks=False):
                         # Traverse collection groups, but stop at movie folders.
                         pending.append(Path(entry.path))
             scanned_count += 1
@@ -194,7 +193,7 @@ def remove_completed_movies(trans_client):
             completed_torrents_dict.update({torrent.name: torrent.id})
     for file, file_id in completed_torrents_dict.items():
         log_event("TORRENT", f"Removing {file}", style="yellow")
-        trans_client.remove_torrent(file_id)
+        trans_client.remove_torrent(file_id, delete_data=False)
 
 
 def collect_incomplete_movies(trans_client):
@@ -304,7 +303,12 @@ def rename_movie_directory(original_dir_path, changed_dir_path):
         log_event("SKIPPED", f"Rename destination already exists: {changed}", style="yellow")
         return str(original)
 
-    original.rename(changed)
+    try:
+        original.rename(changed)
+    except FileNotFoundError as exc:
+        log_event("MISSING", f"Rename skipped: {exc.strerror or 'path unavailable'}\n"
+                  f"Source: {original}\nTarget: {changed}", style="yellow")
+        return None
     return str(changed)
 
 
