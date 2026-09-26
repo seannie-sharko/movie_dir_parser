@@ -120,7 +120,9 @@ export MOVIES_DIRECTORIES="/path/movies1/Library1,/path/movies2/Library2,/path/m
 python movie_dir_parser.py
 ```
 
-The script prints rename tables and a results table with these columns:
+The terminal output starts with a dated banner and five labeled stages: configuration and indexing, Transmission, staging organization, cleanup, and a run summary. Events use consistent labels and colors, with long paths wrapping beneath their messages. Progress remains immediately visible, and redirected output works without terminal color codes.
+
+Nonempty rename tables show original and normalized names for each staging directory. The final summary includes elapsed time and a results table with these columns:
 
 | Column | Meaning |
 | --- | --- |
@@ -140,7 +142,7 @@ Startup validates the configured paths and indexes library names before connecti
 
 The scan uses `os.scandir` to reuse directory-listing metadata. A flat library takes one directory listing, regardless of its number of movie folders. Nested collection groups require additional listings, but movie folders and their extras are not opened during indexing. Only name matches require video checks later. Filesystems that do not provide entry types may still require extra metadata requests to identify directories.
 
-If output stops at `Validating directory: ...`, `Scanning library folder: ...`, or `Checking retained library copy: ...`, the displayed path identifies the current filesystem operation. Check that drive or network mount if it remains unresponsive. A blocked operating-system filesystem call has no portable timeout here; progress output cannot make a stalled mount respond. A reported library scan error stops the run before torrent or staging changes, while a failed retained-copy check prevents that duplicate deletion.
+If output stops at a `VALIDATE`, `SCAN`, or `VERIFY` event, the displayed path identifies the current filesystem operation. Check that drive or network mount if it remains unresponsive. A blocked operating-system filesystem call has no portable timeout here; progress output cannot make a stalled mount respond. A reported library scan error stops the run before torrent or staging changes, while a failed retained-copy check prevents that duplicate deletion.
 
 If you only want to diagnose the library scan with the configured environment variables, this command does not connect to Transmission, send webhooks, or change movie files:
 

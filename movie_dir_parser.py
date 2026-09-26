@@ -1,6 +1,9 @@
 from datetime import datetime as dt
 from rich.console import Console
+from rich import box
+from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 from pathlib import Path
 import errno
 import shutil
@@ -32,6 +35,21 @@ except ValueError:
 if not (1 <= TRANSMISSION_PORT <= 65535):
     raise ValueError("TRANSMISSION_PORT must be between 1 and 65535")
 TRANSMISSION_PROTOCOL = os.getenv("TRANSMISSION_PROTOCOL")
+console = Console(highlight=False)
+
+
+def log_event(label, message, style="cyan"):
+    """Print a consistent, immediately flushed event with literal filenames."""
+    event = Table.grid(padding=(0, 1))
+    event.add_column(width=11, no_wrap=True)
+    event.add_column(overflow="fold")
+    event.add_row(Text(f"  {label}", style=style), Text(str(message)))
+    console.print(event)
+
+
+def print_section(title):
+    console.print()
+    console.rule(Text(title, style="bold cyan"), align="left", style="dim")
 
 
 def parse_env_list(env_var_name):
@@ -52,13 +70,13 @@ def build_movie_lists(movies_directories):
         base = Path(directory)
         recursive = index == 3
         started = time.monotonic()
-        print(f"---> Scanning library {index + 1}/{len(movies_directories)}: {base}", flush=True)
+        log_event("LIBRARY", f"{index + 1}/{len(movies_directories)}  {base}")
         movies = []
         pending = [base]
         scanned_count = 0
         while pending:
             current = pending.pop()
-            print(f"Scanning library folder: {current}", flush=True)
+            log_event("SCAN", current, style="dim")
             with os.scandir(current) as entries:
                 for entry in entries:
                     if entry.name == '@eaDir':
@@ -75,8 +93,8 @@ def build_movie_lists(movies_directories):
                         pending.append(Path(entry.path))
             scanned_count += 1
         movie_lists.append(movies)
-        print(f"Library scan complete: {len(movies)} normalized folder names, "
-              f"{scanned_count} directories scanned in {time.monotonic() - started:.1f}s", flush=True)
+        log_event("INDEXED", f"{len(movies):,} movie names · {scanned_count:,} directories · "
+                  f"{time.monotonic() - started:.1f}s", style="green")
     return movie_lists
 
 
@@ -92,7 +110,7 @@ def build_movie_index(movie_lists):
 
 def has_video(directory):
     """An empty folder or a symlink is not evidence of a retained movie."""
-    print(f"Checking retained library copy: {directory}", flush=True)
+    log_event("VERIFY", directory, style="dim")
     try:
         if not stat.S_ISDIR(os.stat(directory, follow_symlinks=False).st_mode):
             return False
@@ -100,7 +118,7 @@ def has_video(directory):
             return any(os.path.splitext(entry.name)[1].lower() in VIDEO_EXTENSIONS
                        and entry.is_file(follow_symlinks=False) for entry in entries)
     except OSError as exc:
-        print(f"Cannot verify library copy {directory}: {exc}", flush=True)
+        log_event("WARNING", f"Cannot verify library copy {directory}: {exc}", style="yellow")
         return False
 
 
@@ -114,7 +132,7 @@ def validate_directories(staging_directories, library_directories):
     libraries = []
     for paths, resolved in ((staging_directories, staging), (library_directories, libraries)):
         for path in paths:
-            print(f"Validating directory: {path}", flush=True)
+            log_event("VALIDATE", path, style="dim")
             directory = Path(path).resolve()
             if not directory.is_dir():
                 raise ValueError(f"Configured directory does not exist or is not a directory: {directory}")
@@ -159,10 +177,10 @@ def remove_empty_directories(directory):
             target.rmdir()
         except OSError as exc:
             if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST, errno.ENOENT):
-                print(f"Skipping empty-folder cleanup for {target}: {exc.strerror}")
+                log_event("WARNING", f"Cannot remove empty folder {target}: {exc.strerror}", style="yellow")
         else:
             removed.append(str(target))
-            print(f"Removed empty directory: {target}")
+            log_event("EMPTY", f"Removed {target}", style="green")
     return removed
 
 
@@ -175,7 +193,7 @@ def remove_completed_movies(trans_client):
                 or torrent.error == 3:
             completed_torrents_dict.update({torrent.name: torrent.id})
     for file, file_id in completed_torrents_dict.items():
-        print(f"Removing:  {file}")
+        log_event("TORRENT", f"Removing {file}", style="yellow")
         trans_client.remove_torrent(file_id)
 
 
@@ -213,13 +231,12 @@ def collect_completed_movies(directory):
 
 def delete_junk_files(directory):
     """Delete junk files from specified directory."""
-    print(f"---> Deleting junk files in {directory}...")
-    print("Output log:")
+    log_event("CLEANUP", directory)
     for root, dirs, files in os.walk(directory):
         for file in files:
             if is_junk_file(file):
                 file_path = os.path.join(root, file)
-                print(f"Deleting:  {file_path}")
+                log_event("JUNK", f"Deleting {file_path}", style="yellow")
                 os.remove(file_path)
 
 
@@ -237,7 +254,7 @@ def send_webhook_notification(title, message, cur_date):
         response = requests.post(WEBHOOK_URL, json=payload, timeout=10)
         response.raise_for_status()
     except requests.RequestException as exc:
-        print(f"Notification failed for {title}: {type(exc).__name__}")
+        log_event("WARNING", f"Notification failed for {title}: {type(exc).__name__}", style="yellow")
         return False
     return True
 
@@ -284,7 +301,7 @@ def rename_movie_directory(original_dir_path, changed_dir_path):
         return str(original)
 
     if changed.exists() or changed.is_symlink():
-        print(f"Skipping rename: destination already exists: {changed}")
+        log_event("SKIPPED", f"Rename destination already exists: {changed}", style="yellow")
         return str(original)
 
     original.rename(changed)
@@ -295,9 +312,13 @@ def process_movies(directory, completed_movies):
     now = dt.now()
     cur_date = now.strftime("%A %m/%d/%-Y @ %H:%M:%S")
 
-    table = Table(title="Updating Movies...")
-    table.add_column("Original", justify="left", style="cyan", min_width=50)
-    table.add_column("Changed", justify="left", style="yellow", min_width=50)
+    table = Table(
+        title="Renamed movies", title_style="bold", title_justify="left",
+        caption=Text(str(directory), style="dim"), caption_justify="left",
+        box=box.SIMPLE, header_style="bold cyan", padding=(0, 1), expand=True,
+    )
+    table.add_column("Original folder", style="dim", ratio=1, overflow="fold")
+    table.add_column("Normalized folder", style="green", ratio=1, overflow="fold")
     renamed_movies = []
     for movie_name in completed_movies:
         movie_path = Path(movie_name)
@@ -312,7 +333,7 @@ def process_movies(directory, completed_movies):
         if not updated_path or Path(updated_path) == Path(original_dir_path):
             continue
 
-        table.add_row(movie_name, changed_relative_path)
+        table.add_row(Text(movie_name), Text(changed_relative_path))
         renamed_movies.append(changed_relative_path)
         send_webhook_notification(changed_dir_name, "Completed", cur_date)
     return table, renamed_movies
@@ -329,7 +350,7 @@ def delete_movie_directory(movie_name, movie_dir_name):
     """Delete only a real directory strictly beneath the staging root."""
     removed_dir_path = staging_child(movie_dir_name, movie_name)
     if removed_dir_path is not None and removed_dir_path.is_dir():
-        print(f"Deleting: {removed_dir_path}")
+        log_event("DUPLICATE", f"Deleting {removed_dir_path}", style="yellow")
         shutil.rmtree(removed_dir_path)
         return str(removed_dir_path)
     return None
@@ -363,6 +384,12 @@ def process_deleted_movies(finished_list, all_movies, new_movie_directories, lib
 
 
 def main():
+    started = time.monotonic()
+    heading = Text("Movie Directory Parser\n", style="bold cyan")
+    heading.append("Library indexing · Movie organization · Staging cleanup\n", style="default")
+    heading.append(dt.now().strftime("%A, %B %d, %Y  •  %H:%M:%S"), style="dim")
+    console.print(Panel(heading, border_style="cyan", padding=(1, 2), expand=True))
+    print_section("1 / 5  Configuration & library index")
     new_movie_directories = parse_env_list(NEW_MOVIE_DIRECTORIES_ENV)
     movies_directories = parse_env_list(MOVIES_DIRECTORIES_ENV)
     new_movie_directories, movies_directories = validate_directories(
@@ -373,6 +400,8 @@ def main():
     all_movies = build_movie_lists(movies_directories)
     library_by_name = build_movie_index(all_movies)
 
+    print_section("2 / 5  Transmission")
+    log_event("CONNECT", "Connecting to Transmission")
     trans_client = transmission_rpc.Client(
         username=USERNAME,
         password=PASSWORD,
@@ -382,24 +411,28 @@ def main():
 
     # Collect remaining movies from Transmission
     remaining_torrents = collect_incomplete_movies(trans_client)
+    log_event("PENDING", f"{len(remaining_torrents):,} unfinished torrents")
 
     # Clear completed movies from Transmission
     remove_completed_movies(trans_client)
 
+    print_section("3 / 5  Organize staging folders")
     tables = []
     finished_by_directory = []
     skipped_count = 0
-    for directory in new_movie_directories:
+    for index, directory in enumerate(new_movie_directories, start=1):
+        log_event("STAGING", f"{index}/{len(new_movie_directories)}  {directory}")
         delete_junk_files(directory)
         completed, skipped = collect_completed_movies(directory)
         table, finished = process_movies(directory, completed)
         tables.append(table)
         finished_by_directory.append((directory, finished, skipped))
         skipped_count += len(skipped)
+        log_event("ORGANIZED", f"{len(finished):,} renamed · {len(skipped):,} already normalized",
+                  style="green")
 
     # Check both newly renamed and already normalized movies in their own staging directory.
-    print('\n---> Deleting duplicate movies...')
-    print('Output log:')
+    print_section("4 / 5  Duplicate & empty-folder cleanup")
     remove_list = []
     removed_new_count = 0
     for directory, finished, skipped in finished_by_directory:
@@ -410,6 +443,7 @@ def main():
 
     empty_removed = []
     for directory in new_movie_directories:
+        log_event("CHECK", f"Empty folders in {directory}", style="dim")
         empty_removed.extend(remove_empty_directories(directory))
 
     # Calculate total new movies (downloaded - removed duplicates)
@@ -417,7 +451,14 @@ def main():
     new_list = finished_count - removed_new_count
 
     # Output results
-    results_table = Table(title="Results")
+    print_section("5 / 5  Run summary")
+    results_table = Table(
+        title="Run totals", title_style="bold", title_justify="left",
+        box=box.ROUNDED, border_style="dim cyan", header_style="bold",
+        caption=Text(f"Completed in {time.monotonic() - started:.1f}s · "
+                     "New Total counts indexed library folder names.", style="dim"),
+        caption_justify="left", expand=True,
+    )
     results_table.add_column("Finished", justify="center", style="cyan")
     results_table.add_column("Remaining", justify="center", style="yellow")
     results_table.add_column("Skipped", justify="center", style="green")
@@ -435,9 +476,12 @@ def main():
         str(len(empty_removed)),
     )
 
-    console = Console()
     for table in tables:
-        console.print(table)
+        if table.row_count:
+            console.print(table)
+            console.print()
+    if not finished_count:
+        log_event("RENAMES", "No folders renamed this run.", style="dim")
     console.print(results_table)
 
 

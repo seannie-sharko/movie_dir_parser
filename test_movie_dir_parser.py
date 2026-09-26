@@ -1,6 +1,7 @@
 """Run with python -m unittest -v; all filesystem changes use temporary folders."""
 
 import os
+from io import StringIO
 from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -292,9 +293,13 @@ class ParserTests(unittest.TestCase):
     def test_scan_progress_is_flushed_before_directory_access(self):
         movie = self.library_movies("Movie (2012)")[0][0]
         original_scandir = os.scandir
-        with patch("builtins.print") as output:
+        output = StringIO()
+        with patch.object(parser, "console", parser.Console(file=output, width=200)), \
+                patch.object(output, "flush", wraps=output.flush) as flush:
             def scan_after_progress(path):
-                output.assert_any_call(f"Scanning library folder: {path}", flush=True)
+                self.assertIn("SCAN", output.getvalue())
+                self.assertIn(str(path), output.getvalue())
+                flush.assert_called()
                 return original_scandir(path)
 
             with patch.object(parser.os, "scandir", side_effect=scan_after_progress):
