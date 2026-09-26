@@ -6,6 +6,8 @@ import errno
 import shutil
 import os
 import re
+import stat
+import time
 import requests
 import transmission_rpc
 
@@ -43,34 +45,56 @@ def parse_env_list(env_var_name):
 
 
 def build_movie_lists(movies_directories):
-    """Keep real library movie paths so deletion can recheck the retained copy."""
+    """Scan each folder once, reusing scandir metadata and reporting progress."""
     movie_lists = []
     for index, directory in enumerate(movies_directories):
         base = Path(directory)
-        if index == 3:
-            movies = []
-            for root, dirs, _ in os.walk(base):
-                dirs[:] = [name for name in dirs
-                           if name != '@eaDir' and not (Path(root) / name).is_symlink()]
-                if has_video(Path(root)):
-                    movies.append(Path(root))
-        else:
-            movies = [entry for entry in base.iterdir()
-                      if entry.name != '@eaDir' and has_video(entry)]
+        recursive = index == 3
+        started = time.monotonic()
+        print(f"---> Scanning library {index + 1}/{len(movies_directories)}: {base}", flush=True)
+        movies = []
+        pending = [base]
+        scanned_count = 0
+        while pending:
+            current = pending.pop()
+            include_current = recursive or current != base
+            found_video = False
+            print(f"Scanning library folder: {current}", flush=True)
+            # DirEntry type checks normally reuse directory-listing metadata,
+            # avoiding separate Path.is_symlink/is_dir/is_file stat requests.
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if entry.name == '@eaDir':
+                        continue
+                    if (include_current and not found_video
+                            and os.path.splitext(entry.name)[1].lower() in VIDEO_EXTENSIONS
+                            and entry.is_file(follow_symlinks=False)):
+                        found_video = True
+                        if not recursive:
+                            break
+                    if ((recursive or current == base)
+                            and entry.is_dir(follow_symlinks=False)):
+                        pending.append(Path(entry.path))
+            scanned_count += 1
+            if found_video:
+                movies.append(current)
         movie_lists.append(movies)
+        print(f"Library scan complete: {len(movies)} movie folders, "
+              f"{scanned_count} directories scanned in {time.monotonic() - started:.1f}s", flush=True)
     return movie_lists
 
 
 def has_video(directory):
     """An empty folder or a symlink is not evidence of a retained movie."""
-    directory = Path(directory)
-    if directory.is_symlink() or not directory.is_dir():
-        return False
+    print(f"Checking retained library copy: {directory}", flush=True)
     try:
-        return any(file.suffix.lower() in VIDEO_EXTENSIONS
-                   and not file.is_symlink() and file.is_file()
-                   for file in directory.iterdir())
-    except OSError:
+        if not stat.S_ISDIR(os.stat(directory, follow_symlinks=False).st_mode):
+            return False
+        with os.scandir(directory) as entries:
+            return any(os.path.splitext(entry.name)[1].lower() in VIDEO_EXTENSIONS
+                       and entry.is_file(follow_symlinks=False) for entry in entries)
+    except OSError as exc:
+        print(f"Cannot verify library copy {directory}: {exc}", flush=True)
         return False
 
 
@@ -80,11 +104,15 @@ def paths_overlap(first, second):
 
 def validate_directories(staging_directories, library_directories):
     """Resolve aliases and reject configurations that could delete retained media."""
-    staging = [Path(path).resolve() for path in staging_directories]
-    libraries = [Path(path).resolve() for path in library_directories]
-    for directory in staging + libraries:
-        if not directory.is_dir():
-            raise ValueError(f"Configured directory does not exist or is not a directory: {directory}")
+    staging = []
+    libraries = []
+    for paths, resolved in ((staging_directories, staging), (library_directories, libraries)):
+        for path in paths:
+            print(f"Validating directory: {path}", flush=True)
+            directory = Path(path).resolve()
+            if not directory.is_dir():
+                raise ValueError(f"Configured directory does not exist or is not a directory: {directory}")
+            resolved.append(directory)
     for index, directory in enumerate(staging):
         if any(paths_overlap(directory, other) for other in staging[index + 1:] + libraries):
             raise ValueError(f"Staging directories must not overlap each other or library directories: {directory}")
@@ -317,9 +345,9 @@ def process_deleted_movies(finished_list, all_movies, new_movie_directories):
         for movie_dir_name in new_movie_directories:
             # Recheck for each deletion; a library folder may have disappeared.
             retained = any(
-                not any(paths_overlap(library.resolve(), root) for root in staging_roots)
+                has_video(library)
+                and not any(paths_overlap(library.resolve(), root) for root in staging_roots)
                 and not any(parent.is_symlink() for parent in library.parents)
-                and has_video(library)
                 for library in matches
             )
             if not retained:

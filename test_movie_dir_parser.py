@@ -1,6 +1,7 @@
 """Run with python -m unittest -v; all filesystem changes use temporary folders."""
 
 import os
+from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -19,10 +20,12 @@ class ParserTests(unittest.TestCase):
         self.library_temp = TemporaryDirectory()
         self.addCleanup(self.library_temp.cleanup)
         self.library_root = Path(self.library_temp.name).resolve()
+        contexts = ExitStack()
+        self.addCleanup(contexts.close)
         # Prevent any test from making real HTTP or Transmission calls.
-        self.post = self.enterContext(patch.object(parser.requests, "post"))
-        self.client = self.enterContext(patch.object(parser.transmission_rpc, "Client"))
-        self.enterContext(patch.object(parser, "WEBHOOK_URL", "https://example.invalid/notify"))
+        self.post = contexts.enter_context(patch.object(parser.requests, "post"))
+        self.client = contexts.enter_context(patch.object(parser.transmission_rpc, "Client"))
+        contexts.enter_context(patch.object(parser, "WEBHOOK_URL", "https://example.invalid/notify"))
 
     def movie(self, name, files=("movie.mp4",)):
         directory = self.root / name
@@ -212,6 +215,67 @@ class ParserTests(unittest.TestCase):
         linked_video.mkdir()
         (linked_video / "movie.mp4").symlink_to(valid / "movie.mp4")
         self.assertEqual(parser.build_movie_lists([self.library_root]), [[valid]])
+
+    def test_flat_library_scan_visits_each_movie_folder_once(self):
+        movies = self.library_movies("One (2012)", "Two (2013)")[0]
+        empty = self.library_root / "Empty"
+        empty.mkdir()
+        (movies[0] / "Extras").mkdir()
+        (movies[0] / "Extras/extra.mp4").touch()
+        with patch.object(parser.os, "scandir", wraps=os.scandir) as scan:
+            result = parser.build_movie_lists([self.library_root])
+        self.assertCountEqual(result[0], movies)
+        self.assertCountEqual([Path(call.args[0]) for call in scan.call_args_list],
+                              [self.library_root, empty] + movies)
+
+    def test_recursive_collection_scan_does_not_rescan_directories(self):
+        libraries = [self.movie(f"library{i}", ()) for i in range(4)]
+        movie = self.movie("library3/Collection/Movie (2012)")
+        self.movie("library3/@eaDir/Metadata (2013)")
+        (libraries[3] / "linked").symlink_to(movie.parent, target_is_directory=True)
+        with patch.object(parser.os, "scandir", wraps=os.scandir) as scan:
+            result = parser.build_movie_lists(libraries)
+        self.assertEqual(result, [[], [], [], [movie]])
+        self.assertCountEqual([Path(call.args[0]) for call in scan.call_args_list],
+                              libraries + [movie.parent, movie])
+
+    def test_scan_progress_is_flushed_before_directory_access(self):
+        movie = self.library_movies("Movie (2012)")[0][0]
+        original_scandir = os.scandir
+        with patch("builtins.print") as output:
+            def scan_after_progress(path):
+                output.assert_any_call(f"Scanning library folder: {path}", flush=True)
+                return original_scandir(path)
+
+            with patch.object(parser.os, "scandir", side_effect=scan_after_progress):
+                self.assertEqual(parser.build_movie_lists([self.library_root]), [[movie]])
+
+    def test_library_scan_error_stops_before_torrent_or_staging_changes(self):
+        staging = self.movie("staging", ("notes.txt",))
+        library = self.movie("library", ())
+        with patch.dict(os.environ, {
+            "NEW_MOVIE_DIRECTORIES": str(staging),
+            "MOVIES_DIRECTORIES": str(library),
+        }), patch.object(parser.os, "scandir", side_effect=PermissionError("unavailable")):
+            with self.assertRaises(PermissionError):
+                parser.main()
+        self.assertTrue((staging / "notes.txt").exists())
+        self.client.assert_not_called()
+
+    def test_library_stat_failure_preserves_staging_copy(self):
+        movie = self.movie("Movie (2012)")
+        library = self.library_movies(movie.name)[0][0]
+        original_stat = os.stat
+
+        def unavailable_stat(path, *args, **kwargs):
+            if Path(path) == library:
+                raise PermissionError("unavailable")
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(parser.os, "stat", side_effect=unavailable_stat):
+            self.assertEqual(parser.process_deleted_movies([movie.name], [[library]], [self.root]), [])
+        self.assertTrue((movie / "movie.mp4").exists())
+        self.post.assert_not_called()
 
     def test_missing_library_video_preserves_staging_copy(self):
         movie = self.movie("Movie (2012)")

@@ -132,6 +132,20 @@ The script prints rename tables and a results table with these columns:
 
 `New Total` is the existing library count; it does not include newly renamed staging folders. Rename collisions and unsupported names are not included in the Skipped count. Deleted folder paths are printed in the output log.
 
+## Slow library scans
+
+Startup validates the configured paths and scans the libraries before connecting to Transmission or modifying staging files. Each path validation and folder scan prints an immediately flushed progress message. Each library finishes with its movie count, scanned directory count, and elapsed time.
+
+The scan uses `os.scandir` to reuse directory-listing metadata and visits each folder once. This reduces separate metadata requests on network shares and slower drives. Filesystems that do not provide entry types may still require extra metadata requests.
+
+If output stops at `Validating directory: ...`, `Scanning library folder: ...`, or `Checking retained library copy: ...`, the displayed path identifies the current filesystem operation. Check that drive or network mount if it remains unresponsive. A blocked operating-system filesystem call has no portable timeout here; progress output cannot make a stalled mount respond. A reported library scan error stops the run before torrent or staging changes, while a failed retained-copy check prevents that duplicate deletion.
+
+If you only want to diagnose the library scan with the configured environment variables, this command does not connect to Transmission, send webhooks, or change movie files:
+
+```bash
+python -c 'import movie_dir_parser as m; _, libraries = m.validate_directories(m.parse_env_list(m.NEW_MOVIE_DIRECTORIES_ENV), m.parse_env_list(m.MOVIES_DIRECTORIES_ENV)); m.build_movie_lists(libraries)'
+```
+
 ## Example workflow
 
 A typical run looks like this:
@@ -156,7 +170,7 @@ After installing the dependencies, run from the project directory:
 python -m unittest -v
 ```
 
-The test suite uses Python's built-in `unittest` framework. It creates temporary movie folders and mocks Transmission and HTTP calls, so it does not modify your media library or contact external services. The tests use `TestCase.enterContext`, which requires Python 3.11 or later.
+The test suite uses Python's built-in `unittest` framework. It creates temporary movie folders and mocks Transmission and HTTP calls, so it does not modify your media library or contact external services. It uses `contextlib.ExitStack` for mocks and supports Python 3.9 or later.
 
 Coverage includes environment parsing, directory validation, rename patterns, junk cleanup, normalized folders, multiple videos per folder, rename collisions, torrent status filtering, and duplicate deletion. It also covers optional webhooks and notification failures, nested folders and extras, uppercase video extensions, single-directory configurations, and processing additional staging and library directories. Cleanup tests cover normalized duplicates, missing library videos, overlapping paths, symlinks, mount points, nested empty folders, hidden files, permission errors, and files created just before empty-folder removal.
 
