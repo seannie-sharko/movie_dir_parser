@@ -206,7 +206,7 @@ class ParserTests(unittest.TestCase):
         ]
         self.assertEqual(parser.collect_incomplete_movies(client), [])
 
-    def test_library_index_ignores_empty_folders_files_and_symlinks(self):
+    def test_library_names_are_candidates_and_video_validation_is_deferred(self):
         valid = self.library_movies("Real (2012)")[0][0]
         (self.library_root / "Empty (2013)").mkdir()
         (self.library_root / "File (2014)").touch()
@@ -214,9 +214,17 @@ class ParserTests(unittest.TestCase):
         linked_video = self.library_root / "Linked Video (2016)"
         linked_video.mkdir()
         (linked_video / "movie.mp4").symlink_to(valid / "movie.mp4")
-        self.assertEqual(parser.build_movie_lists([self.library_root]), [[valid]])
+        candidates = parser.build_movie_lists([self.library_root])
+        self.assertCountEqual(candidates[0], [valid, self.library_root / "Empty (2013)", linked_video])
+        empty_match = self.movie("Empty (2013)")
+        linked_match = self.movie("Linked Video (2016)")
+        self.assertEqual(parser.process_deleted_movies(
+            [empty_match.name, linked_match.name], candidates, [self.root]
+        ), [])
+        self.assertTrue((empty_match / "movie.mp4").exists())
+        self.assertTrue((linked_match / "movie.mp4").exists())
 
-    def test_flat_library_scan_visits_each_movie_folder_once(self):
+    def test_flat_library_scan_does_not_open_any_movie_folder(self):
         movies = self.library_movies("One (2012)", "Two (2013)")[0]
         empty = self.library_root / "Empty"
         empty.mkdir()
@@ -225,8 +233,7 @@ class ParserTests(unittest.TestCase):
         with patch.object(parser.os, "scandir", wraps=os.scandir) as scan:
             result = parser.build_movie_lists([self.library_root])
         self.assertCountEqual(result[0], movies)
-        self.assertCountEqual([Path(call.args[0]) for call in scan.call_args_list],
-                              [self.library_root, empty] + movies)
+        scan.assert_called_once_with(self.library_root)
 
     def test_recursive_collection_scan_does_not_rescan_directories(self):
         libraries = [self.movie(f"library{i}", ()) for i in range(4)]
@@ -237,7 +244,50 @@ class ParserTests(unittest.TestCase):
             result = parser.build_movie_lists(libraries)
         self.assertEqual(result, [[], [], [], [movie]])
         self.assertCountEqual([Path(call.args[0]) for call in scan.call_args_list],
-                              libraries + [movie.parent, movie])
+                              libraries + [movie.parent])
+
+    def test_large_library_only_opens_root_and_case_insensitive_match(self):
+        for number in range(250):
+            (self.library_root / f"Unrelated {number} (2000)").mkdir()
+        retained = self.library_movies("THE RISE AND FALL OF THE CLASH (2012)")[0][0]
+        staged = self.movie("The Rise And Fall Of The Clash (2012)")
+        unique = self.movie("Unique (2020)")
+        original_scandir = os.scandir
+        library_scans = []
+
+        def scan_only_needed_paths(path):
+            # rmtree also calls scandir, using a file descriptor on supported systems.
+            if not isinstance(path, int):
+                path = Path(path)
+                self.assertIn(path, (self.library_root, retained, staged))
+                if path != staged:
+                    library_scans.append(path)
+            return original_scandir(path)
+
+        with patch.object(parser.os, "scandir", side_effect=scan_only_needed_paths):
+            candidates = parser.build_movie_lists([self.library_root])
+            index = parser.build_movie_index(candidates)
+            self.assertEqual(len(index), 251)
+            self.assertIn(staged.name.lower(), index)
+            removed = parser.process_deleted_movies(
+                [staged.name, unique.name], candidates, [self.root], index
+            )
+        self.assertEqual(removed, [str(staged)])
+        self.assertEqual(library_scans, [self.library_root, retained])
+        self.assertTrue((retained / "movie.mp4").exists())
+        self.assertTrue((unique / "movie.mp4").exists())
+
+    def test_matching_empty_library_folder_does_not_hide_another_valid_copy(self):
+        empty = self.library_root / "One/Movie (2012)"
+        empty.mkdir(parents=True)
+        retained = self.library_movies("Two/MOVIE (2012)")[0][0]
+        staged = self.movie("Movie (2012)")
+        libraries = [[empty], [retained]]
+        index = parser.build_movie_index(libraries)
+        self.assertEqual(len(index["movie (2012)"]), 2)
+        self.assertEqual(parser.process_deleted_movies([staged.name], libraries, [self.root], index),
+                         [str(staged)])
+        self.assertTrue((retained / "movie.mp4").exists())
 
     def test_scan_progress_is_flushed_before_directory_access(self):
         movie = self.library_movies("Movie (2012)")[0][0]

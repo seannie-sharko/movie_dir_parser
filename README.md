@@ -71,7 +71,9 @@ The current script expects:
 
 Every staging directory receives junk cleanup, movie discovery, renaming, duplicate processing, and empty-folder cleanup. Both successfully renamed folders and already normalized folders are checked against the libraries. Only the staging copy is deleted.
 
-When four or more library directories are configured, the fourth retains its special treatment as a nested collection. It is scanned recursively for `.mp4` and `.mkv` files regardless of extension case, excluding `@eaDir` directories and symbolic links. Other libraries are scanned for immediate child movie folders. Each qualifying folder must directly contain a regular video file; empty folders, loose files, and symlinks do not count as library copies. All configured libraries are included in duplicate detection and library totals.
+Library indexing collects normalized directory names ending with a parenthesized year, such as `The Rise And Fall Of The Clash (2012)`, without opening those movie folders. Other directory names, loose files, `@eaDir`, and symbolic links are excluded. When four or more libraries are configured, the fourth is treated as a nested collection: grouping folders are traversed until normalized movie folders are reached, then traversal stops at those movie folders. Other libraries use immediate child directory names.
+
+The names are indexed once using `casefold()` for case-insensitive lookup. Only a library folder whose name matches a staging candidate is opened to verify that it contains a regular video before deletion. An empty folder may appear in the name index, but it never authorizes duplicate deletion.
 
 All configured paths must exist and be directories. Staging roots must not overlap each other or any library root: identical paths, nested paths, and aliases resolving to such paths are rejected. Library roots may overlap each other, as in the collection example above. The script validates these rules and scans the libraries before connecting to Transmission or changing staging files.
 
@@ -79,7 +81,7 @@ All configured paths must exist and be directories. Staging roots must not overl
 
 For example, if `NEW_MOVIE_DIRECTORIES` includes `/downloads` and `MOVIES_DIRECTORIES` includes `/library`, then `/downloads/Collection/Movie Title (2012)` can be deleted when `/library/Movie Title (2012)` contains a video. No rename is required first. The library copy is kept.
 
-Matching uses the full movie folder name, case-insensitively. Before each deletion, the script rechecks that a matching library folder still contains a regular `.mp4` or `.mkv` file and is outside staging. Copies found only in staging do not establish a retained library copy. Deletion rejects the staging root itself, absolute candidate paths, parent traversal, and candidates reached through symlinks or mount points.
+Matching uses the full movie folder name, case-insensitively: `The Rise And Fall Of The Clash (2012)` matches `THE RISE AND FALL OF THE CLASH (2012)`. Spaces, punctuation, and the year must otherwise match; this is not fuzzy matching. Before each deletion, the script rechecks that a matching library folder still contains a regular `.mp4` or `.mkv` file and is outside staging. Copies found only in staging do not establish a retained library copy. Deletion rejects the staging root itself, absolute candidate paths, parent traversal, and candidates reached through symlinks or mount points.
 
 This is a name-based duplicate check, not a content comparison: it does not compare checksums, editions, video quality, or playback validity. Keep different editions under distinct folder names. The retained copies must be in the configured libraries; the script does not search the entire filesystem.
 
@@ -127,16 +129,16 @@ The script prints rename tables and a results table with these columns:
 | Skipped | Video folders already ending with a parenthesized year, including any subsequently deleted as duplicates |
 | Deleted | Duplicate staging movie folders deleted, including already normalized folders |
 | New | Successfully renamed folders remaining after duplicate deletion; deletion of older normalized folders does not reduce this count |
-| New Total | Sum of qualifying video folders collected from the libraries before staging processing |
+| New Total | Sum of normalized directory names indexed across the configured libraries |
 | Empty Removed | Empty descendant directories removed after staging processing |
 
-`New Total` is the existing library count; it does not include newly renamed staging folders. Rename collisions and unsupported names are not included in the Skipped count. Deleted folder paths are printed in the output log.
+`New Total` is a directory-name count, not a verified video count: empty normalized folders can be included, and overlapping library roots can count the same folder more than once. It does not include newly renamed staging folders. Rename collisions and unsupported names are not included in the Skipped count. Deleted folder paths are printed in the output log.
 
 ## Slow library scans
 
-Startup validates the configured paths and scans the libraries before connecting to Transmission or modifying staging files. Each path validation and folder scan prints an immediately flushed progress message. Each library finishes with its movie count, scanned directory count, and elapsed time.
+Startup validates the configured paths and indexes library names before connecting to Transmission or modifying staging files. Each path validation and directory listing prints an immediately flushed progress message. Each library finishes with its normalized name count, scanned directory count, and elapsed time.
 
-The scan uses `os.scandir` to reuse directory-listing metadata and visits each folder once. This reduces separate metadata requests on network shares and slower drives. Filesystems that do not provide entry types may still require extra metadata requests.
+The scan uses `os.scandir` to reuse directory-listing metadata. A flat library takes one directory listing, regardless of its number of movie folders. Nested collection groups require additional listings, but movie folders and their extras are not opened during indexing. Only name matches require video checks later. Filesystems that do not provide entry types may still require extra metadata requests to identify directories.
 
 If output stops at `Validating directory: ...`, `Scanning library folder: ...`, or `Checking retained library copy: ...`, the displayed path identifies the current filesystem operation. Check that drive or network mount if it remains unresponsive. A blocked operating-system filesystem call has no portable timeout here; progress output cannot make a stalled mount respond. A reported library scan error stops the run before torrent or staging changes, while a failed retained-copy check prevents that duplicate deletion.
 
@@ -178,7 +180,7 @@ Coverage includes environment parsing, directory validation, rename patterns, ju
 
 Some workflow assumptions remain:
 
-- Library ordering still matters: the fourth library directory receives special collection handling; other libraries are scanned only for immediate child movie folders containing videos.
+- Library ordering still matters: the fourth library directory receives special collection handling; other libraries are scanned only for immediate child directory names. Movie names must end in a parenthesized year to be indexed; collection groups should not use that movie naming pattern.
 - There is no config file. Configuration uses environment variables; validation covers nonempty directory lists, existing directories, staging path overlaps, and the Transmission port.
 - There is no dry-run mode.
 - The script deletes files and folders.

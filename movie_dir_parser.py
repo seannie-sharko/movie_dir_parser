@@ -15,6 +15,7 @@ import transmission_rpc
 VIDEO_EXTENSIONS = {".mp4", ".mkv"}
 JUNK_SUFFIXES = (".exe", "www.YTS.MX.jpg", "@SynoResource", "Official site.jpg", "www.YTS.LT.jpg")
 YEAR_PATTERN = re.compile(r"[12][0-9]{3}")
+NORMALIZED_MOVIE_PATTERN = re.compile(r"\([12][0-9]{3}\)$")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 USERNAME = os.getenv("TRANSMISSION_USERNAME")
 PASSWORD = os.getenv("TRANSMISSION_PASSWORD")
@@ -45,7 +46,7 @@ def parse_env_list(env_var_name):
 
 
 def build_movie_lists(movies_directories):
-    """Scan each folder once, reusing scandir metadata and reporting progress."""
+    """Collect normalized folder names without opening individual movie folders."""
     movie_lists = []
     for index, directory in enumerate(movies_directories):
         base = Path(directory)
@@ -57,31 +58,36 @@ def build_movie_lists(movies_directories):
         scanned_count = 0
         while pending:
             current = pending.pop()
-            include_current = recursive or current != base
-            found_video = False
             print(f"Scanning library folder: {current}", flush=True)
-            # DirEntry type checks normally reuse directory-listing metadata,
-            # avoiding separate Path.is_symlink/is_dir/is_file stat requests.
             with os.scandir(current) as entries:
                 for entry in entries:
                     if entry.name == '@eaDir':
                         continue
-                    if (include_current and not found_video
-                            and os.path.splitext(entry.name)[1].lower() in VIDEO_EXTENSIONS
-                            and entry.is_file(follow_symlinks=False)):
-                        found_video = True
-                        if not recursive:
-                            break
-                    if ((recursive or current == base)
-                            and entry.is_dir(follow_symlinks=False)):
+                    normalized = NORMALIZED_MOVIE_PATTERN.search(entry.name)
+                    if not normalized and not recursive:
+                        continue
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    if normalized:
+                        movies.append(Path(entry.path))
+                    elif recursive:
+                        # Traverse collection groups, but stop at movie folders.
                         pending.append(Path(entry.path))
             scanned_count += 1
-            if found_video:
-                movies.append(current)
         movie_lists.append(movies)
-        print(f"Library scan complete: {len(movies)} movie folders, "
+        print(f"Library scan complete: {len(movies)} normalized folder names, "
               f"{scanned_count} directories scanned in {time.monotonic() - started:.1f}s", flush=True)
     return movie_lists
+
+
+def build_movie_index(movie_lists):
+    """Map case-insensitive names to every candidate library path once per run."""
+    library_by_name = {}
+    for movies in movie_lists:
+        for movie in movies:
+            library_path = Path(movie)
+            library_by_name.setdefault(library_path.name.casefold(), []).append(library_path)
+    return library_by_name
 
 
 def has_video(directory):
@@ -198,7 +204,7 @@ def collect_completed_movies(directory):
         # A video folder and its descendants are one unit, including extras.
         dirs[:] = []
         relative_path = str(movie_path.relative_to(base))
-        if re.search(r'\([12][0-9]{3}\)$', movie_path.name):
+        if NORMALIZED_MOVIE_PATTERN.search(movie_path.name):
             skipped_list.append(relative_path)
         else:
             completed_list.append(relative_path)
@@ -329,17 +335,14 @@ def delete_movie_directory(movie_name, movie_dir_name):
     return None
 
 
-def process_deleted_movies(finished_list, all_movies, new_movie_directories):
+def process_deleted_movies(finished_list, all_movies, new_movie_directories, library_by_name=None):
     """Delete candidates only while a matching external library movie still exists."""
     now = dt.now()
     cur_date = now.strftime("%A %m/%d/%-Y @ %H:%M:%S")
     remove_list = []
-    library_by_name = {}
+    if library_by_name is None:
+        library_by_name = build_movie_index(all_movies)
     staging_roots = [Path(directory).resolve() for directory in new_movie_directories]
-    for movies in all_movies:
-        for movie in movies:
-            library_path = Path(movie)
-            library_by_name.setdefault(library_path.name.casefold(), []).append(library_path)
     for movie_name in finished_list:
         matches = library_by_name.get(Path(movie_name).name.casefold(), [])
         for movie_dir_name in new_movie_directories:
@@ -368,6 +371,7 @@ def main():
 
     # Scan libraries before making any changes to torrents or staging folders.
     all_movies = build_movie_lists(movies_directories)
+    library_by_name = build_movie_index(all_movies)
 
     trans_client = transmission_rpc.Client(
         username=USERNAME,
@@ -399,10 +403,10 @@ def main():
     remove_list = []
     removed_new_count = 0
     for directory, finished, skipped in finished_by_directory:
-        removed_new = process_deleted_movies(finished, all_movies, [directory])
+        removed_new = process_deleted_movies(finished, all_movies, [directory], library_by_name)
         removed_new_count += len(removed_new)
         remove_list.extend(removed_new)
-        remove_list.extend(process_deleted_movies(skipped, all_movies, [directory]))
+        remove_list.extend(process_deleted_movies(skipped, all_movies, [directory], library_by_name))
 
     empty_removed = []
     for directory in new_movie_directories:
