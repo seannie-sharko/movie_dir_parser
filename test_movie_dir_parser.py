@@ -44,6 +44,115 @@ class ParserTests(unittest.TestCase):
             movies.append(directory)
         return [movies]
 
+    def torrent(self, name="Tracked", files=("Tracked/movie.mp4",), status="downloading"):
+        return SimpleNamespace(
+            name=name, download_dir="/remote/downloads", status=status,
+            get_files=lambda: [SimpleNamespace(name=name) for name in files],
+        )
+
+    def test_orphaned_parts_renamed_recursively_preserving_contents(self):
+        movie = self.movie("Collection/Secrets In The Sisterhood (2025) [1080p]",
+                           ("movie.mp4.part", "movie.srt.part", "keep.part.txt", "twice.part.part"))
+        (movie / "movie.mp4.part").write_bytes(b"movie contents")
+        self.client.return_value.get_torrents.return_value = []
+        renamed = parser.rename_orphaned_part_files(self.root, self.client.return_value)
+        self.assertCountEqual(renamed, [str(movie / name) for name in
+                                       ("movie.mp4", "movie.srt", "twice.part")])
+        self.assertEqual((movie / "movie.mp4").read_bytes(), b"movie contents")
+        self.assertTrue((movie / "keep.part.txt").exists())
+        self.assertFalse((movie / "movie.mp4.part").exists())
+
+    def test_any_transmission_status_protects_parts_by_folder_name(self):
+        movie = self.movie("Collection/Tracked/Subtitles", ("subtitle.srt.part",))
+        for status in ("downloading", "download pending", "stopped", "checking",
+                       "seeding", "seed pending", None):
+            with self.subTest(status=status):
+                self.client.return_value.get_torrents.return_value = [self.torrent(status=status)]
+                self.assertEqual(parser.rename_orphaned_part_files(
+                    self.root, self.client.return_value), [])
+                self.assertTrue((movie / "subtitle.srt.part").exists())
+
+    def test_file_metadata_protects_renamed_torrent_and_different_mount_paths(self):
+        movie = self.movie("Collection/Actual Release", ("movie.mp4.part", "subtitle.srt.part"))
+        self.client.return_value.get_torrents.return_value = [
+            self.torrent(name="Renamed display name", files=("Actual Release/movie.mp4",))
+        ]
+        self.assertEqual(parser.rename_orphaned_part_files(self.root, self.client.return_value), [])
+        self.assertTrue((movie / "subtitle.srt.part").exists())
+
+    def test_single_file_torrent_protects_file_inside_unrelated_folder(self):
+        movie = self.movie("Unrelated", ("movie.mp4.part", "orphan.srt.part"))
+        self.client.return_value.get_torrents.return_value = [
+            self.torrent(name="Other display name", files=("movie.mp4",))
+        ]
+        self.assertEqual(parser.rename_orphaned_part_files(self.root, self.client.return_value),
+                         [str(movie / "orphan.srt")])
+        self.assertTrue((movie / "movie.mp4.part").exists())
+
+    def test_part_lookup_failure_or_missing_metadata_never_authorizes_rename(self):
+        movie = self.movie("Orphan", ("movie.mp4.part",))
+        client = self.client.return_value
+        client.get_torrents.side_effect = RuntimeError("RPC unavailable")
+        with self.assertRaises(RuntimeError):
+            parser.rename_orphaned_part_files(self.root, client)
+        client.get_torrents.side_effect = None
+        for torrents in (None, [self.torrent(files=())],
+                         [SimpleNamespace(name="Incomplete response")]):
+            client.get_torrents.return_value = torrents
+            with self.subTest(torrents=torrents), self.assertRaises((ValueError, AttributeError)):
+                parser.rename_orphaned_part_files(self.root, client)
+        self.assertTrue((movie / "movie.mp4.part").exists())
+        self.assertFalse((movie / "movie.mp4").exists())
+
+    def test_part_cleanup_preserves_collisions_symlinks_mounts_and_metadata(self):
+        movie = self.movie("Movie", ("movie.mp4.part", "movie.mp4", "subtitle.srt.part"))
+        (movie / "movie.mp4").write_bytes(b"existing")
+        (movie / "subtitle.srt").symlink_to(self.root / "missing")
+        external = self.library_root / "external.mp4.part"
+        external.write_bytes(b"external")
+        (movie / "linked.mp4.part").symlink_to(external)
+        (self.root / "linked_dir").symlink_to(self.library_root, target_is_directory=True)
+        mounted = self.movie("Mounted", ("mounted.mp4.part",))
+        metadata = self.movie("@eaDir", ("metadata.mp4.part",))
+        self.client.return_value.get_torrents.return_value = []
+        with patch.object(Path, "is_mount", autospec=True, side_effect=lambda path: path == mounted):
+            self.assertEqual(parser.rename_orphaned_part_files(self.root, self.client.return_value), [])
+        self.assertEqual((movie / "movie.mp4").read_bytes(), b"existing")
+        for path in (external, mounted / "mounted.mp4.part", metadata / "metadata.mp4.part",
+                     movie / "movie.mp4.part", movie / "subtitle.srt.part"):
+            self.assertTrue(path.exists())
+        self.assertTrue((movie / "linked.mp4.part").is_symlink())
+
+    def test_main_checks_part_references_before_removing_torrent_records(self):
+        staging = self.movie("staging", ())
+        library = self.movie("library", ())
+        movie = self.movie("staging/Tracked", ("movie.mp4.part",))
+        torrent = self.torrent(status="stopped")
+        torrent.is_finished, torrent.error, torrent.id = False, 3, 1
+        client = self.client.return_value
+        client.get_torrents.return_value = [torrent]
+        client.remove_torrent.side_effect = lambda *args, **kwargs: setattr(
+            client.get_torrents, "return_value", [])
+        with patch.dict(os.environ, {
+            "NEW_MOVIE_DIRECTORIES": str(staging), "MOVIES_DIRECTORIES": str(library),
+        }), patch.object(parser.Console, "print"):
+            parser.main()
+        client.remove_torrent.assert_called_once_with(1, delete_data=False)
+        self.assertTrue((movie / "movie.mp4.part").exists())
+        self.assertFalse((movie / "movie.mp4").exists())
+
+    def test_main_discovers_movie_after_orphaned_part_rename(self):
+        staging = self.movie("staging", ())
+        library = self.movie("library", ())
+        self.movie("staging/Movie (2025) [1080p]", ("movie.mp4.part", "movie.srt.part"))
+        self.client.return_value.get_torrents.return_value = []
+        with patch.dict(os.environ, {
+            "NEW_MOVIE_DIRECTORIES": str(staging), "MOVIES_DIRECTORIES": str(library),
+        }), patch.object(parser.Console, "print"):
+            parser.main()
+        self.assertTrue((staging / "Movie (2025)/movie.mp4").exists())
+        self.assertTrue((staging / "Movie (2025)/movie.srt").exists())
+
     def test_environment_list_strips_whitespace_and_empty_entries(self):
         with patch.dict(os.environ, {"TEST_PATHS": " /one, ,/two ,"}):
             self.assertEqual(parser.parse_env_list("TEST_PATHS"), ["/one", "/two"])

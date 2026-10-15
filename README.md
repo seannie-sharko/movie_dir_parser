@@ -15,6 +15,7 @@ It is built around a specific personal workflow:
 On each run, the script can:
 
 - connect to Transmission over RPC
+- strip trailing `.part` from files with no matching Transmission reference
 - collect unfinished torrents that are not seeding or queued to seed
 - remove finished torrents, torrents with `seed` in their status, and torrents with error code `3` from Transmission
 - scan configured movie library folders
@@ -48,6 +49,33 @@ Movie folders can be nested inside grouping folders. Renames preserve the parent
 If the destination folder already exists, the rename is skipped and the source stays unchanged. The attempted rename is not counted as finished and does not send a completion notification. The existing normalized destination is independently eligible for duplicate deletion when a library copy exists. Names that do not match a supported rename pattern are left unchanged.
 
 If a source folder or its parent becomes unavailable between discovery and rename, a `MISSING` event records the source and target paths and processing continues with the next movie. That attempt is not counted as finished and sends no completion notification. Other rename errors, such as permission failures, still stop the run. Transmission removal explicitly uses `delete_data=False` to keep downloaded files.
+
+## Orphaned `.part` files
+
+Before removing any Transmission records, the script recursively checks files ending in
+exactly `.part` in every configured staging directory. Include `/Library3/__NEW_Movies/`
+in `NEW_MOVIE_DIRECTORIES` to process that tree. For example, an unreferenced
+`Secrets.In.The.Sisterhood.2025.mp4.part` becomes `Secrets.In.The.Sisterhood.2025.mp4`,
+and its `.srt.part` becomes `.srt`. Only the final `.part` suffix is removed.
+
+Any matching torrent protects the file, regardless of status: downloading, queued,
+checking, paused, errored, finished, and seeding records all count. Matching checks
+the destination path, torrent names, and components of torrent file paths against
+the staging file and its parent folders, case-insensitively. Name matching supports
+different mount paths on the Transmission host; shared filenames or folder names
+can conservatively cause unrelated files to be skipped.
+
+A fresh full torrent listing is fetched after scanning each staging tree that has
+`.part` files. RPC failures, missing file metadata (including magnets still fetching
+metadata), or malformed records stop the run before renaming files in that tree.
+An empty successful listing permits cleanup. Checks use a snapshot; avoid adding
+or relocating downloads while the script runs. Removing the suffix does not verify
+that an orphaned file contains a complete or playable download.
+
+Existing destinations, including broken symlinks, are skipped. Symlinks, mount
+points and their descendants, and `@eaDir` folders are excluded. Each successful
+file rename logs a `PART` event; protected files log `PART SKIP`. Recovered videos
+then enter the script's usual folder normalization and duplicate cleanup workflow.
 
 ## Directory configuration
 

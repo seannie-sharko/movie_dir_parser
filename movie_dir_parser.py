@@ -205,6 +205,79 @@ def collect_incomplete_movies(trans_client):
     return incomplete_torrents_list
 
 
+def collect_transmission_file_references(trans_client):
+    """Index every torrent, regardless of status; incomplete RPC data is unsafe."""
+    torrents = trans_client.get_torrents(
+        arguments=["id", "name", "downloadDir", "files", "priorities", "wanted"]
+    )
+    if not isinstance(torrents, (list, tuple)):
+        raise ValueError("Cannot verify Transmission files: invalid torrent listing")
+    names, paths = set(), set()
+    for torrent in torrents:
+        if not isinstance(torrent.name, str) or not torrent.name:
+            raise ValueError("Cannot verify Transmission files: missing torrent name")
+        download_dir = torrent.download_dir
+        if not isinstance(download_dir, str) or not Path(download_dir).is_absolute():
+            raise ValueError("Cannot verify Transmission files: missing download directory")
+        files = torrent.get_files()
+        if not files:
+            # A magnet waiting for metadata cannot establish that a file is absent.
+            raise ValueError("Cannot verify Transmission files: missing file metadata")
+        names.add(torrent.name.casefold())
+        for file in files:
+            if not isinstance(file.name, str) or not file.name:
+                raise ValueError("Cannot verify Transmission files: missing filename")
+            relative = Path(file.name.removesuffix(".part"))
+            if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+                raise ValueError("Cannot verify Transmission files: invalid filename")
+            # Name matching also protects downloads when RPC and this machine use
+            # different mount paths, or when the torrent's display name changed.
+            names.update(part.casefold() for part in relative.parts)
+            paths.add(str(Path(download_dir) / relative).casefold())
+    return names, paths
+
+
+def rename_orphaned_part_files(directory, trans_client):
+    """Strip one trailing .part only when no Transmission reference matches."""
+    base = Path(directory).resolve()
+    candidates = []
+    for root, dirs, files in os.walk(base, followlinks=False):
+        dirs[:] = [name for name in dirs if name != "@eaDir"
+                   and staging_child(base, (Path(root) / name).relative_to(base)) is not None]
+        for name in files:
+            if name.endswith(".part") and name != ".part":
+                candidates.append((Path(root) / name).relative_to(base))
+    if not candidates:
+        return []
+
+    log_event("CHECK", f"Transmission references for {len(candidates):,} .part files in {base}")
+    # Fetch after the walk and before any renames. RPC errors deliberately stop
+    # the run; an unavailable server must never look like an empty torrent list.
+    names, paths = collect_transmission_file_references(trans_client)
+    renamed = []
+    for relative in candidates:
+        source = staging_child(base, relative)
+        if source is None or not source.is_file():
+            continue
+        target = source.with_name(source.name.removesuffix(".part"))
+        target_relative = target.relative_to(base)
+        if (any(part.casefold() in names for part in target_relative.parts)
+                or str(target).casefold() in paths):
+            log_event("PART SKIP", f"Still referenced by Transmission: {source}", style="yellow")
+            continue
+        if target.exists() or target.is_symlink():
+            log_event("PART SKIP", f"Destination already exists: {target}", style="yellow")
+            continue
+        try:
+            source.rename(target)
+        except OSError as exc:
+            log_event("WARNING", f"Cannot rename {source}: {exc}", style="yellow")
+            continue
+        renamed.append(str(target))
+        log_event("PART", f"Renamed {source} -> {target.name}", style="green")
+    return renamed
+
+
 def collect_completed_movies(directory):
     """Return movie paths relative to staging, keeping each movie's extras together."""
     completed_list = []
@@ -412,6 +485,10 @@ def main():
         host=TRANSMISSION_HOST,
         port=TRANSMISSION_PORT,
         protocol=TRANSMISSION_PROTOCOL)
+
+    # Check all torrent records before removing any, including error/seed records.
+    for directory in new_movie_directories:
+        rename_orphaned_part_files(directory, trans_client)
 
     # Collect remaining movies from Transmission
     remaining_torrents = collect_incomplete_movies(trans_client)
