@@ -89,20 +89,54 @@ class ParserTests(unittest.TestCase):
                          [str(movie / "orphan.srt")])
         self.assertTrue((movie / "movie.mp4.part").exists())
 
-    def test_part_lookup_failure_or_missing_metadata_never_authorizes_rename(self):
+    def test_part_lookup_failure_or_malformed_records_never_authorize_rename(self):
         movie = self.movie("Orphan", ("movie.mp4.part",))
         client = self.client.return_value
         client.get_torrents.side_effect = RuntimeError("RPC unavailable")
         with self.assertRaises(RuntimeError):
             parser.rename_orphaned_part_files(self.root, client)
         client.get_torrents.side_effect = None
-        for torrents in (None, [self.torrent(files=())],
-                         [SimpleNamespace(name="Incomplete response")]):
+        for torrents in (None, [SimpleNamespace(name="Incomplete response")]):
             client.get_torrents.return_value = torrents
             with self.subTest(torrents=torrents), self.assertRaises((ValueError, AttributeError)):
                 parser.rename_orphaned_part_files(self.root, client)
         self.assertTrue((movie / "movie.mp4.part").exists())
         self.assertFalse((movie / "movie.mp4").exists())
+
+    def test_missing_metadata_skips_all_parts_then_retries_on_next_call(self):
+        movie = self.movie("Orphan", ("movie.mp4.part", "subtitle.srt.part"))
+        client = self.client.return_value
+        tracked = self.torrent(files=("Tracked/other.mp4",))
+        client.get_torrents.return_value = [tracked, self.torrent(name="Pending magnet", files=())]
+        with patch.object(parser, "log_event") as output:
+            self.assertEqual(parser.rename_orphaned_part_files(self.root, client), [])
+        self.assertEqual(output.call_args.args[0], "PART SKIP")
+        self.assertIn("Pending magnet", output.call_args.args[1])
+        self.assertIn(str(self.root), output.call_args.args[1])
+        self.assertEqual({path.name for path in movie.iterdir()},
+                         {"movie.mp4.part", "subtitle.srt.part"})
+        client.get_torrents.return_value = [
+            tracked, self.torrent(name="Pending magnet", files=("Pending magnet/download.mp4",))
+        ]
+        self.assertCountEqual(parser.rename_orphaned_part_files(self.root, client),
+                              [str(movie / "movie.mp4"), str(movie / "subtitle.srt")])
+
+    def test_main_continues_organizing_movies_when_magnet_has_no_metadata(self):
+        staging = self.movie("staging", ())
+        library = self.movie("library", ())
+        partial = self.movie("staging/Unknown", ("movie.mp4.part",))
+        self.movie("staging/Ready (2025) [1080p]")
+        torrent = self.torrent(name="Pending magnet", files=())
+        torrent.is_finished, torrent.error, torrent.id = False, 0, 1
+        self.client.return_value.get_torrents.return_value = [torrent]
+        with patch.dict(os.environ, {
+            "NEW_MOVIE_DIRECTORIES": str(staging), "MOVIES_DIRECTORIES": str(library),
+        }), patch.object(parser.Console, "print"):
+            parser.main()
+        self.assertTrue((partial / "movie.mp4.part").exists())
+        self.assertFalse((partial / "movie.mp4").exists())
+        self.assertTrue((staging / "Ready (2025)/movie.mp4").exists())
+        self.client.return_value.remove_torrent.assert_not_called()
 
     def test_part_cleanup_preserves_collisions_symlinks_mounts_and_metadata(self):
         movie = self.movie("Movie", ("movie.mp4.part", "movie.mp4", "subtitle.srt.part"))

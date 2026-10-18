@@ -205,6 +205,10 @@ def collect_incomplete_movies(trans_client):
     return incomplete_torrents_list
 
 
+class MissingTransmissionFileMetadata(ValueError):
+    """A torrent has no file list, so orphaned parts cannot be identified."""
+
+
 def collect_transmission_file_references(trans_client):
     """Index every torrent, regardless of status; incomplete RPC data is unsafe."""
     torrents = trans_client.get_torrents(
@@ -222,7 +226,10 @@ def collect_transmission_file_references(trans_client):
         files = torrent.get_files()
         if not files:
             # A magnet waiting for metadata cannot establish that a file is absent.
-            raise ValueError("Cannot verify Transmission files: missing file metadata")
+            raise MissingTransmissionFileMetadata(
+                f"Cannot verify Transmission files: missing file metadata for {torrent.name!r} "
+                "(the torrent may still be fetching magnet metadata)"
+            )
         names.add(torrent.name.casefold())
         for file in files:
             if not isinstance(file.name, str) or not file.name:
@@ -253,7 +260,12 @@ def rename_orphaned_part_files(directory, trans_client):
     log_event("CHECK", f"Transmission references for {len(candidates):,} .part files in {base}")
     # Fetch after the walk and before any renames. RPC errors deliberately stop
     # the run; an unavailable server must never look like an empty torrent list.
-    names, paths = collect_transmission_file_references(trans_client)
+    try:
+        names, paths = collect_transmission_file_references(trans_client)
+    except MissingTransmissionFileMetadata as exc:
+        log_event("PART SKIP", f"Skipping all .part renames in {base}: {exc}. "
+                  "Try again once Transmission has the file metadata.", style="yellow")
+        return []
     renamed = []
     for relative in candidates:
         source = staging_child(base, relative)

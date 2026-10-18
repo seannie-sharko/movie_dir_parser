@@ -66,8 +66,10 @@ different mount paths on the Transmission host; shared filenames or folder names
 can conservatively cause unrelated files to be skipped.
 
 A fresh full torrent listing is fetched after scanning each staging tree that has
-`.part` files. RPC failures, missing file metadata (including magnets still fetching
-metadata), or malformed records stop the run before renaming files in that tree.
+`.part` files. Missing file metadata (including magnets still fetching metadata)
+logs a `PART SKIP` warning naming the torrent and skips all `.part` renames in that
+tree; the rest of the run continues. Retry once Transmission has the metadata.
+RPC failures or malformed records still stop the run before renaming files in that tree.
 An empty successful listing permits cleanup. Checks use a snapshot; avoid adding
 or relocating downloads while the script runs. Removing the suffix does not verify
 that an orphaned file contains a complete or playable download.
